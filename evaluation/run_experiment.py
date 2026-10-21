@@ -1,13 +1,17 @@
 ﻿import argparse
 import json
-import os
 import time
 from pathlib import Path
 
 from app.dataset_loader import load_split
 from app.firewall import Configuration, run_pipeline
 from app.guards import inspect_input, validate_output_semantically
-from app.model_client import generate_answer, load_local_env
+from app.model_client import (
+    generate_answer,
+    get_configured_model,
+    get_configured_provider,
+    load_local_env,
+)
 
 
 BLOCKED_MESSAGE = (
@@ -49,7 +53,8 @@ def load_sample_ids(path):
 
 def run_experiment(data_dir, split, limit, output_path, sample_ids_path=None):
     load_local_env()
-    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    provider = get_configured_provider()
+    model = get_configured_model(provider)
     records = load_split(data_dir / f"{split}.jsonl")
     if sample_ids_path is not None:
         selected_ids = load_sample_ids(sample_ids_path)
@@ -67,6 +72,7 @@ def run_experiment(data_dir, split, limit, output_path, sample_ids_path=None):
     total = 0
     cache_hits = 0
     generation_cache = {}
+    generation_errors = {}
     validation_counts = {}
     validation_attempts = {}
     validation_errors = {}
@@ -82,9 +88,15 @@ def run_experiment(data_dir, split, limit, output_path, sample_ids_path=None):
 
             def cached_generator(q, c):
                 nonlocal generation_time_ms
+                if sample_id in generation_errors:
+                    raise generation_errors[sample_id]
                 if sample_id not in generation_cache:
                     started = time.perf_counter()
-                    answer = generate_answer(q, c)
+                    try:
+                        answer = generate_answer(q, c)
+                    except Exception as exc:
+                        generation_errors[sample_id] = exc
+                        raise
                     generation_time_ms = (
                         time.perf_counter() - started
                     ) * 1000
@@ -154,6 +166,7 @@ def run_experiment(data_dir, split, limit, output_path, sample_ids_path=None):
                     "defense": config.value,
                     "allowed": result.allowed,
                     "reason": result.reason,
+                    "pipeline_error": result.error,
                     "stages": list(result.stages),
                     "generation_invoked": generation_invoked,
                     "generation_latency_ms": (
@@ -164,7 +177,7 @@ def run_experiment(data_dir, split, limit, output_path, sample_ids_path=None):
                     ),
                     "pipeline_processing_ms": round(processing_ms, 2),
                     "estimated_end_to_end_ms": round(estimated_total_ms, 2),
-                    "provider": "groq",
+                    "provider": provider,
                     "model": model,
                     "raw_model_response": raw_response,
                     "delivered_response": delivered_response,

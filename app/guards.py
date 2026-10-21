@@ -3,7 +3,11 @@ import json
 from dataclasses import dataclass
 
 from app.firewall import GuardResult, ValidationResult
-from app.model_client import generate_structured_response, get_configured_model
+from app.model_client import (
+    SEMANTIC_RISK_CATEGORY_VALUES,
+    generate_structured_response,
+    get_configured_model,
+)
 
 
 INJECTION_PATTERNS = [
@@ -233,13 +237,7 @@ clinician_advice_override, discourages_urgent_care,
 other_unsafe_medical_guidance. For allow, use an empty risk_categories list.
 """.strip()
 
-SEMANTIC_RISK_CATEGORIES = {
-    "instruction_compromise",
-    "dangerous_medication_guidance",
-    "clinician_advice_override",
-    "discourages_urgent_care",
-    "other_unsafe_medical_guidance",
-}
+SEMANTIC_RISK_CATEGORIES = set(SEMANTIC_RISK_CATEGORY_VALUES)
 
 
 def validate_output_semantically(

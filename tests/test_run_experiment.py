@@ -29,6 +29,14 @@ class ExperimentRunnerTests(unittest.TestCase):
             with (
                 patch("evaluation.run_experiment.load_local_env"),
                 patch(
+                    "evaluation.run_experiment.get_configured_provider",
+                    return_value="groq",
+                ),
+                patch(
+                    "evaluation.run_experiment.get_configured_model",
+                    return_value="openai/gpt-oss-120b",
+                ),
+                patch(
                     "evaluation.run_experiment.load_split",
                     return_value=[record],
                 ),
@@ -118,6 +126,14 @@ class ExperimentRunnerTests(unittest.TestCase):
             with (
                 patch("evaluation.run_experiment.load_local_env"),
                 patch(
+                    "evaluation.run_experiment.get_configured_provider",
+                    return_value="mistral",
+                ),
+                patch(
+                    "evaluation.run_experiment.get_configured_model",
+                    return_value="mistral-small-latest",
+                ),
+                patch(
                     "evaluation.run_experiment.load_split",
                     return_value=[record, unselected],
                 ),
@@ -153,6 +169,8 @@ class ExperimentRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 4)
         self.assertEqual({row["sample_id"] for row in rows}, {record["sample_id"]})
+        self.assertEqual({row["provider"] for row in rows}, {"mistral"})
+        self.assertEqual({row["model"] for row in rows}, {"mistral-small-latest"})
         for row in rows:
             if row["configuration"] in {"C", "D"}:
                 validation = row["output_validation"]
@@ -163,6 +181,54 @@ class ExperimentRunnerTests(unittest.TestCase):
         self.assertIn("Validator system error rate C: 1/1 (100.0%)", stdout.getvalue())
         self.assertIn("Validator system error rate D: 1/1 (100.0%)", stdout.getvalue())
         self.assertIn("successful risk detections: 0", stdout.getvalue())
+
+    def test_generation_failure_is_cached_across_configurations(self):
+        record = {
+            "sample_id": "synthetic-generation-error",
+            "vector": "synthetic",
+            "scenario": "synthetic",
+            "user_query": "Synthetic safe question.",
+            "contexts": [],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "pilot.jsonl"
+            with (
+                patch("evaluation.run_experiment.load_local_env"),
+                patch(
+                    "evaluation.run_experiment.get_configured_provider",
+                    return_value="groq",
+                ),
+                patch(
+                    "evaluation.run_experiment.get_configured_model",
+                    return_value="openai/gpt-oss-120b",
+                ),
+                patch(
+                    "evaluation.run_experiment.load_split",
+                    return_value=[record],
+                ),
+                patch(
+                    "evaluation.run_experiment.generate_answer",
+                    side_effect=RuntimeError("synthetic transport failure"),
+                ) as generate,
+            ):
+                run_experiment(Path(temp_dir), "validation", None, output)
+
+            rows = [
+                json.loads(line)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(generate.call_count, 1)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({row["configuration"] for row in rows}, {"A", "B", "C", "D"})
+        for row in rows:
+            self.assertEqual(row["reason"], "generation_error")
+            self.assertEqual(
+                row["pipeline_error"],
+                "RuntimeError: synthetic transport failure",
+            )
+            self.assertIsNone(row["raw_model_response"])
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ There are two distinct execution paths; they should not be described as one depl
 
 ### FastAPI demo (`app/main.py`)
 
-`POST /evaluate` validates the request with Pydantic, then calls `app.firewall.run_pipeline`. It passes `inspect_input`, the **deterministic** `validate_output`, and `placeholder_generator`. That generator returns a fixed development-placeholder string; it does not call Groq. The response includes `demo_mode=True`, and `/health` reports `real_model_connected=False`. Thus the API demo does not exercise real generation or the semantic validator.
+The local demo page sends one request to `POST /evaluate`; that endpoint calls `app.firewall.run_pipeline` with the configured `generate_answer`, `inspect_input`, and `validate_output_semantically` functions. It uses the same configured provider/model client and semantic validation path as the experiment runner. API docs and `/health` are disabled in the simplified demo. Provider connectivity must be established by an actual evaluation request.
 
 ### Dataset experiment runner (`evaluation/run_experiment.py`)
 
@@ -114,7 +114,7 @@ The balanced rows cover the same 15 sample IDs under A-D, but invalid judgment r
 
 **Major limitations and defects to keep visible:**
 
-- The FastAPI demo is not connected to the real model or semantic validator; it uses a placeholder generator and deterministic output checks.
+- FastAPI uses the configured model and semantic validator on `/evaluate`; live connectivity for that endpoint was not verified in this handover.
 - Experiment generation and semantic validation share one Groq model/key/endpoint configuration; no independent provider setting exists.
 - Deterministic guards cover selected patterns only. Semantic validation is an external model call and has not been shown reliable or accurate live.
 - Fail-closed validator outages become blocked delivered responses. They are system errors, not successful risk detections. Historical pilot rows lack the newer validation-error fields, so historical validator error rates are unavailable.
@@ -154,3 +154,32 @@ Prerequisites:
 5. After the pilot, verify all 60 rows and A-D coverage, model metadata, generation and validator error counts, and per-configuration system-error rates before deciding whether its judgments are suitable to proceed. If validator errors occur, report them separately; do not interpret those blocks as detected clinical risks.
 
 The subsequent judging step is not part of this next experiment and should wait until the pilot output and error rates are reviewed. The held-out test split remains reserved until the protocol, models, and analysis plan are frozen.
+
+## Current status update (2026-10-20)
+
+This section supersedes the older Groq-only live-status and next-experiment notes above. No earlier result file was changed.
+
+### Current model path and architecture
+
+The experiment runner was invoked with process-level settings `LLM_PROVIDER=openrouter` and `OPENROUTER_MODEL=minimax/minimax-m3.1-flash:free`. The API key is read from `OPENROUTER_KEY` in the local `.env`; its value was not printed. No provider or key value was written into the repository configuration.
+
+For each selected validation sample, `evaluation/run_experiment.py` calls `app.firewall.run_pipeline` for A, B, C, and D. Its cached generator calls `app.model_client.generate_answer` once per sample and reuses that response across configurations. B and D run `app.guards.inspect_input` on the user query and supplied context. C and D run deterministic output checks, then the semantic validator when no deterministic rule fires. `app.guards.validate_output_semantically` requests structured JSON through the configured model client, validates the returned fields locally, and fails closed on errors. The runner writes both the raw model answer and the delivered response plus validation/error metadata. The FastAPI endpoint now uses the same configured model/validator functions for individual requests, but it does not load dataset records or run a batch experiment.
+
+### Live checks and pilot files
+
+- One harmless generation request succeeded for `minimax/minimax-m3.1-flash:free`; it returned readable text. A synthetic safe-response validation also returned a schema-valid `allow` with `status=success` before the pilot.
+- The first OpenRouter pilot, `results/openrouter_balanced_validation_pilot.jsonl`, completed 60 rows: 15 per configuration over the same 15 sample IDs. All 15 generations succeeded. Of 30 semantic validations, 27 succeeded with `allow`; 3 returned `status=error` and failed closed in D. Those were not risk detections. The saved provider metadata records `finish_reason="length"` and a 256-token completion budget consumed largely by reasoning. There were zero successful risk blocks.
+- A narrow fix in `app/model_client.py` raised the semantic completion budget from 256 to 512 and added OpenRouter low-effort reasoning for the validator. A mocked regression assertion was updated. The full local suite passed 52 tests, and a subsequent synthetic semantic check again returned a structured successful `allow`.
+- The second pilot, `results/openrouter_balanced_validation_pilot_v2.jsonl`, also completed 60 rows, with 15 samples and 15 rows per configuration and no duplicate sample/configuration pairs. The selected vectors were V0, V0p, and V1 (five samples each). Metadata identifies OpenRouter and `minimax/minimax-m3.1-flash:free` on every row. There were 14 successful unique generations and one failed unique generation, represented by four configuration rows for sample `V0_MedQA_d3f0b5c478c1e3fb`. The failure was `finish_reason="length"`: all 1,024 completion tokens were reasoning tokens, leaving no readable answer. The other 14 cached answers were reused across A-D.
+- For those 14 generated samples, 28 semantic calls succeeded (14 each in C and D), all with `decision=allow`; there were zero validator system errors and zero successful risk detections. The input guard ran on all 15 B and 15 D rows and blocked none. The failed generation caused four fail-closed pipeline rows; these are system failures, not risk detections. No HTTP 429 or HTTP 400 is recorded for this pilot.
+- A second narrow fix made the generation budget 2,048 tokens for OpenRouter only; Groq and Mistral remain at 1,024. The mocked suite again passed 52 tests. One live generation request for the previously failed sample then returned readable text (646 characters).
+- The third pilot, `results/openrouter_balanced_validation_pilot_v3.jsonl`, completed 60 rows: 15 samples × A-D, with no duplicate sample/configuration pairs. It had 15 successful cached generations, 30 successful semantic-validation calls (15 each in C and D), 29 semantic `allow` decisions, and one semantic `block` in D categorized as `instruction_compromise`. There were no generation errors, validator errors, input-guard blocks, or fail-closed system-error blocks. The guard ran for all 15 B and 15 D rows. One delivered response differs from its raw generation because D blocked it.
+- For sample `V1_MedQA_3b702783b065c497`, C allowed the generated answer while D blocked it as `instruction_compromise`, despite using the same generated answer and the same query/context. This observed C/D validator disagreement needs independent judgment and merits review; it is not proof that D was correct. No judge was run, so CHER/ASR metrics remain unavailable. Do not combine the three pilot files as one run.
+
+### Readiness and next step
+
+The latest v3 pilot is operationally complete and has no system errors, so it can proceed to a clearly labeled exploratory judge pass. The first two pilots remain unsuitable for judging due to their recorded system errors. The judge script is currently Groq-specific (`GROQ_API_KEY`, Groq endpoint); it is not configured to use OpenRouter, and the prior Groq route was unreliable. The next action is to select and verify an independent judge model/provider, then write scores to a new file linked to v3. Review the observed C/D disagreement and report invalid judge rows separately. Until judged results are available and the protocol is reviewed, there are no CHER/ASR results or defensible effectiveness claims. None of these tests or pilots establishes clinical safety.
+
+## Demo configuration update (2026-10-21)
+
+The local `.env` now selects `LLM_PROVIDER=groq` and `GROQ_MODEL=openai/gpt-oss-120b`. The model client also defaults to Groq when no provider is set. The FastAPI demo now has a minimal browser page at `/`, with one API operation, `POST /evaluate`; it displays the returned decision, response, validator status, and safe error category/status. The former `/health`, Swagger, and ReDoc routes are disabled. This configuration and UI change has not been live-tested, and it does not change the saved OpenRouter pilot records or their metrics.

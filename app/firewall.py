@@ -49,6 +49,7 @@ class PipelineResult:
     reason: str
     stages: tuple[str, ...]
     output_validation: ValidationResult | None = None
+    error: str | None = None
 
 
 InputGuard = Callable[[str, list[str]], GuardResult]
@@ -106,9 +107,13 @@ def run_pipeline(
 
     try:
         response = generate(query, contexts)
-    except Exception:
+    except Exception as exc:
         return PipelineResult(
-            False, None, "generation_error", tuple(stages)
+            False,
+            None,
+            "generation_error",
+            tuple(stages),
+            error=f"{type(exc).__name__}: {exc}",
         )
 
     if not isinstance(response, str) or not response.strip():
